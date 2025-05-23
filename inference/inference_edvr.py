@@ -1,4 +1,4 @@
-# File gốc # inference_edvr.py
+# inference_edvr.py
 # Phiên bản tinh gọn tối đa phần import model.
 # Giả định script này được đặt và chạy từ thư mục gốc của dự án BasicSR
 # (ví dụ: /content/BasicSR/) và lớp model là 'EDVR' trong 'basicsr.archs.edvr_arch'.
@@ -29,7 +29,6 @@ logger = logging.getLogger(__name__)
 # =======================================================================================
 # >>> IMPORT LỚP MODEL EDVR <<<
 # =======================================================================================
-# Giả định tên lớp thực tế là 'EDVR'. Nếu khác, hãy thay đổi tương ứng.
 try:
     from basicsr.archs.edvr_arch import EDVR
     logger.info("INFO: Đã import thành công model EDVR từ basicsr.archs.edvr_arch.")
@@ -39,7 +38,6 @@ except ImportError as e:
     exit(1)
 # =======================================================================================
 
-# Xác định đường dẫn gốc của BasicSR dựa trên vị trí của script này
 try:
     SCRIPT_DIR = Path(__file__).resolve().parent
     BASICSR_ROOT_PATH = SCRIPT_DIR.parent
@@ -50,7 +48,6 @@ except NameError:
 
 logger.info(f"INFO: Đường dẫn gốc BasicSR được xác định là: {BASICSR_ROOT_PATH}")
 
-# DANH BẠ MODEL: Đã được cập nhật CHÍNH XÁC theo danh sách bạn cung cấp.
 AVAILABLE_MODELS: Dict[str, Dict[str, str]] = {
     "EDVR_L_DeblurComp_REDS": {
         "model_path": str(BASICSR_ROOT_PATH / "experiments/pretrained_models/EDVR/EDVR_L_deblurcomp_REDS_official-0e988e5c.pth"),
@@ -81,21 +78,6 @@ AVAILABLE_MODELS: Dict[str, Dict[str, str]] = {
 SUPPORTED_IMAGE_EXTENSIONS: List[str] = ['.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff']
 
 def load_img_sequence(all_frame_paths: List[Path], current_window_indices: List[int], nframes_model: int) -> torch.Tensor:
-    """
-    Tải và tiền xử lý một chuỗi các frame ảnh.
-
-    Args:
-        all_frame_paths: Danh sách tất cả các đường dẫn đến frame LQ.
-        current_window_indices: Danh sách các chỉ số frame cho cửa sổ hiện tại.
-        nframes_model: Số lượng frame mà model yêu cầu.
-
-    Returns:
-        Một tensor chứa chuỗi các frame đã được tiền xử lý.
-    
-    Raises:
-        ValueError: Nếu số lượng frame index không khớp với nframes_model.
-        FileNotFoundError: Nếu không đọc được file ảnh.
-    """
     if len(current_window_indices) != nframes_model:
         raise ValueError(f"Số frame index ({len(current_window_indices)}) không khớp nframes model ({nframes_model})")
     
@@ -107,7 +89,6 @@ def load_img_sequence(all_frame_paths: List[Path], current_window_indices: List[
             raise FileNotFoundError(f"Không đọc được file ảnh: {img_path}")
         
         img_lq = img_lq.astype(np.float32) / 255.
-        # Chuyển đổi BGR (OpenCV) sang RGB và HWC sang CHW
         img_lq_rgb_chw = np.transpose(img_lq[:, :, [2, 1, 0]], (2, 0, 1))
         img_lq_tensor = torch.from_numpy(img_lq_rgb_chw).float()
         imgs_lq_list.append(img_lq_tensor)
@@ -115,7 +96,6 @@ def load_img_sequence(all_frame_paths: List[Path], current_window_indices: List[
     return torch.stack(imgs_lq_list)
 
 def main() -> None:
-    """Hàm chính để chạy quá trình inference."""
     parser = argparse.ArgumentParser(description="Inference EDVR (Predefined Models)")
     parser.add_argument('--input', type=str, required=True, help='Thư mục chứa các frame LQ đầu vào')
     parser.add_argument('--output', type=str, required=True, help='Thư mục lưu các frame SR đầu ra')
@@ -146,7 +126,6 @@ def main() -> None:
     except OSError as e:
         logger.error(f"LỖI: Không thể tạo thư mục output '{output_dir}'. Lỗi: {e}"); return
 
-
     try:
         with open(yaml_config_path, 'r') as f:
             opt: Dict[str, Any] = yaml.safe_load(f)
@@ -170,8 +149,6 @@ def main() -> None:
         logger.error(f"LỖI: Không tìm thấy cấu hình 'network_g' trong file YAML '{yaml_config_path}'."); return
         
     try:
-        # Loại bỏ khóa 'type' khỏi network_g_opt trước khi truyền vào constructor
-        # vì EDVR class không chấp nhận tham số 'type' một cách trực tiếp.
         network_g_params = {k: v for k, v in network_g_opt.items() if k != 'type'}
         model = EDVR(**network_g_params)
     except Exception as e:
@@ -203,20 +180,31 @@ def main() -> None:
         all_lq_paths.extend(sorted(list(input_dir.glob(f'*{ext}'))))
     all_lq_paths = sorted(list(set(all_lq_paths)), key=lambda p: p.name)
 
-
     if not all_lq_paths:
         logger.info(f"INFO: Không tìm thấy file ảnh nào ({', '.join(SUPPORTED_IMAGE_EXTENSIONS)}) trong thư mục '{args.input}'."); return
 
-    nframes: Optional[int] = network_g_opt.get('num_frame')
-    if nframes is None:
-        logger.error("LỖI: 'num_frame' không được định nghĩa trong network_g của file YAML."); return
+    # === SỬA LỖI TÍNH TOÁN NFRAMES VÀ CENTER_OFFSET ===
+    nframes_val: Optional[Any] = network_g_opt.get('num_frame')
+    if nframes_val is None or not isinstance(nframes_val, int) or nframes_val <= 0:
+        logger.error(f"LỖI: 'num_frame' không được định nghĩa, không phải là số nguyên dương trong network_g của file YAML. Giá trị: {nframes_val}"); return
+    nframes: int = nframes_val # Đã được xác nhận là int > 0
         
-    center_offset: int = network_g_opt.get('center_frame_idx', nframes // 2)
-    
+    center_offset_val: Optional[Any] = network_g_opt.get('center_frame_idx')
+    if center_offset_val is None: # Bao gồm trường hợp 'center_frame_idx' thiếu hoặc giá trị là null trong YAML
+        center_offset: int = nframes // 2
+        logger.info(f"INFO: 'center_frame_idx' không được chỉ định hoặc là null trong YAML. Sử dụng giá trị mặc định: {center_offset} (tính từ {nframes} frames).")
+    elif not isinstance(center_offset_val, int):
+        logger.error(f"LỖI: 'center_frame_idx' trong YAML không phải là số nguyên. Giá trị: {center_offset_val}. Sử dụng giá trị mặc định {nframes // 2}.")
+        center_offset: int = nframes // 2
+    else:
+        center_offset: int = center_offset_val
+
+    # Kiểm tra tính hợp lệ của center_offset sau khi đã xác định
     if not (0 <= center_offset < nframes): 
         logger.warning(f"CẢNH BÁO: 'center_frame_idx' ({center_offset}) không hợp lệ cho 'num_frame' ({nframes}). "
-                       f"Sử dụng giá trị mặc định là {nframes // 2}.")
+                       f"Sử dụng giá trị mặc định cuối cùng là {nframes // 2}.")
         center_offset = nframes // 2
+    # ======================================================
 
     logger.info(f"INFO: Tổng số LQ frames tìm thấy: {len(all_lq_paths)}. "
                 f"Model sẽ sử dụng {nframes} frames mỗi lần xử lý. "
@@ -226,7 +214,6 @@ def main() -> None:
     num_target_frames: int = max(0, len(all_lq_paths) - (nframes - 1))
     if num_target_frames == 0 and len(all_lq_paths) > 0:
         logger.warning(f"CẢNH BÁO: Số lượng frame ({len(all_lq_paths)}) không đủ để xử lý với cửa sổ {nframes} frames.")
-
 
     with torch.no_grad():
         for i in range(len(all_lq_paths)): 
@@ -278,7 +265,6 @@ def main() -> None:
         logger.warning("Không có frame nào được xử lý thành công.")
     else:
         logger.info("Không có frame nào được xử lý do không đủ số lượng frame đầu vào cho cửa sổ của model.")
-
 
 if __name__ == '__main__':
     main()
