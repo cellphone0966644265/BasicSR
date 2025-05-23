@@ -1,4 +1,4 @@
-# inference_edvr.py
+# File gốc # inference_edvr.py
 # Phiên bản tinh gọn tối đa phần import model.
 # Giả định script này được đặt và chạy từ thư mục gốc của dự án BasicSR
 # (ví dụ: /content/BasicSR/) và lớp model là 'EDVR' trong 'basicsr.archs.edvr_arch'.
@@ -183,14 +183,13 @@ def main() -> None:
     if not all_lq_paths:
         logger.info(f"INFO: Không tìm thấy file ảnh nào ({', '.join(SUPPORTED_IMAGE_EXTENSIONS)}) trong thư mục '{args.input}'."); return
 
-    # === SỬA LỖI TÍNH TOÁN NFRAMES VÀ CENTER_OFFSET ===
     nframes_val: Optional[Any] = network_g_opt.get('num_frame')
     if nframes_val is None or not isinstance(nframes_val, int) or nframes_val <= 0:
         logger.error(f"LỖI: 'num_frame' không được định nghĩa, không phải là số nguyên dương trong network_g của file YAML. Giá trị: {nframes_val}"); return
-    nframes: int = nframes_val # Đã được xác nhận là int > 0
+    nframes: int = nframes_val
         
     center_offset_val: Optional[Any] = network_g_opt.get('center_frame_idx')
-    if center_offset_val is None: # Bao gồm trường hợp 'center_frame_idx' thiếu hoặc giá trị là null trong YAML
+    if center_offset_val is None:
         center_offset: int = nframes // 2
         logger.info(f"INFO: 'center_frame_idx' không được chỉ định hoặc là null trong YAML. Sử dụng giá trị mặc định: {center_offset} (tính từ {nframes} frames).")
     elif not isinstance(center_offset_val, int):
@@ -199,12 +198,10 @@ def main() -> None:
     else:
         center_offset: int = center_offset_val
 
-    # Kiểm tra tính hợp lệ của center_offset sau khi đã xác định
     if not (0 <= center_offset < nframes): 
         logger.warning(f"CẢNH BÁO: 'center_frame_idx' ({center_offset}) không hợp lệ cho 'num_frame' ({nframes}). "
                        f"Sử dụng giá trị mặc định cuối cùng là {nframes // 2}.")
         center_offset = nframes // 2
-    # ======================================================
 
     logger.info(f"INFO: Tổng số LQ frames tìm thấy: {len(all_lq_paths)}. "
                 f"Model sẽ sử dụng {nframes} frames mỗi lần xử lý. "
@@ -225,39 +222,64 @@ def main() -> None:
 
             current_indices = list(range(start_win_idx, end_win_idx))
             target_frame_path = all_lq_paths[i]
+            
+            input_seq: Optional[torch.Tensor] = None
+            output_tensor: Optional[torch.Tensor] = None
+            output_img_tensor: Optional[torch.Tensor] = None
+            output_img_np: Optional[np.ndarray] = None
+            output_img_hwc_rgb: Optional[np.ndarray] = None
+            output_img_hwc_bgr: Optional[np.ndarray] = None
+            output_img_uint8: Optional[np.ndarray] = None
 
             try:
                 input_seq = load_img_sequence(all_lq_paths, current_indices, nframes)
-            except Exception as e:
-                logger.error(f"Lỗi khi tải chuỗi ảnh cho frame đích {target_frame_path.name}: {e}"); continue
-            
-            input_seq = input_seq.unsqueeze(0).to(device) 
-            
-            try:
-                output_tensor: torch.Tensor = model(input_seq)
-            except Exception as e: 
-                logger.error(f"Lỗi trong quá trình inference cho frame đích {target_frame_path.name}: {e}"); continue
+                input_seq = input_seq.unsqueeze(0).to(device) 
+                output_tensor = model(input_seq)
+                
+                output_img_tensor = output_tensor.squeeze(0).cpu().clamp_(0, 1)
+                output_img_np = output_img_tensor.numpy()
+                output_img_hwc_rgb = np.transpose(output_img_np, (1, 2, 0)) 
+                output_img_hwc_bgr = output_img_hwc_rgb[:, :, ::-1] 
+                output_img_uint8 = (output_img_hwc_bgr * 255.0).round().astype(np.uint8)
 
-            output_img_tensor = output_tensor.squeeze(0).cpu().clamp_(0, 1)
-            
-            output_img_np = output_img_tensor.numpy()
-            output_img_hwc_rgb = np.transpose(output_img_np, (1, 2, 0)) 
-            output_img_hwc_bgr = output_img_hwc_rgb[:, :, ::-1] 
-            
-            output_img_uint8 = (output_img_hwc_bgr * 255.0).round().astype(np.uint8)
-
-            model_name_sanitized = args.model_name.replace(' ', '_').replace('/', '_')
-            out_filename = f"{target_frame_path.stem}_{model_name_sanitized}{target_frame_path.suffix}"
-            output_path = output_dir / out_filename
-            
-            try:
+                model_name_sanitized = args.model_name.replace(' ', '_').replace('/', '_')
+                out_filename = f"{target_frame_path.stem}_{model_name_sanitized}{target_frame_path.suffix}"
+                output_path = output_dir / out_filename
+                
                 cv2.imwrite(str(output_path), output_img_uint8)
-            except Exception as e:
-                logger.error(f"Lỗi khi lưu ảnh {output_path}: {e}"); continue
-            
-            processed_count += 1
-            if processed_count % 10 == 0 or processed_count == num_target_frames:
-                 logger.info(f"Đã xử lý {processed_count}/{num_target_frames} frames đích...")
+                
+                processed_count += 1
+                if processed_count % 10 == 0 or processed_count == num_target_frames:
+                     logger.info(f"Đã xử lý {processed_count}/{num_target_frames} frames đích...")
+
+            except RuntimeError as e: # Bắt cụ thể RuntimeError cho OOM
+                if 'out of memory' in str(e).lower():
+                    logger.error(f"Lỗi CUDA out of memory khi xử lý frame đích {target_frame_path.name}: {e}")
+                    logger.error("Thử giảm độ phân giải, sử dụng model nhỏ hơn, hoặc tăng VRAM GPU nếu có thể.")
+                    # Không thể tiếp tục xử lý các frame khác nếu lỗi OOM xảy ra liên tục
+                    # Bạn có thể quyết định dừng hẳn tại đây:
+                    # logger.error("Dừng xử lý do lỗi CUDA out of memory.")
+                    # return 
+                    # Hoặc bỏ qua frame này và cố gắng tiếp tục (có thể không hiệu quả nếu vấn đề là cố hữu)
+                    pass # Bỏ qua frame này, giải phóng bộ nhớ và thử frame tiếp theo
+                else: # Các lỗi RuntimeError khác
+                    logger.error(f"Lỗi RuntimeError khi xử lý frame đích {target_frame_path.name}: {e}"); 
+                    pass # Bỏ qua frame này
+            except Exception as e: 
+                logger.error(f"Lỗi không xác định khi xử lý frame đích {target_frame_path.name}: {e}"); 
+                pass # Bỏ qua frame này
+            finally:
+                # Giải phóng bộ nhớ GPU bất kể thành công hay thất bại
+                del input_seq
+                del output_tensor
+                if output_img_tensor is not None: del output_img_tensor
+                if output_img_np is not None: del output_img_np
+                if output_img_hwc_rgb is not None: del output_img_hwc_rgb
+                if output_img_hwc_bgr is not None: del output_img_hwc_bgr
+                if output_img_uint8 is not None: del output_img_uint8
+                
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
     if processed_count > 0:
         logger.info(f"Hoàn thành! Đã xử lý {processed_count} frames. Kết quả được lưu tại: {args.output}")
